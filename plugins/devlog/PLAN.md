@@ -66,7 +66,7 @@ devlog/
    focus, "N gaps unexplained · Explain first", then "Generate and end session" / "Generate and keep
    journaling". The mod writes `.devlog/papers/.context-<name>.md` (the journal's story in order with
    outputs, the gaps and answers with UNEXPLAINED ones marked, the redacted diff from the first to
-   the last snapshot), then submits a normal Claude turn that reads it and writes
-   `.devlog/papers/<date>-<type>.md`. turn.start/turn.complete follow that turn: Paper ready (Open /
-   Done) or a clear failure. The paper turn is left out of the journal; papers are listed in
-   state.json `papers`.
+   the last snapshot), then one background `$.model.complete` call (Opus, 32k tokens out, context cut
+   in the middle past 350k chars) writes `.devlog/papers/<date>-<type>.md`, redacted once more
+   before saving. Nothing goes through the chat. Paper ready (Open / Done) + a toast, or a clear
+   failure. Papers are listed in state.json `papers`.

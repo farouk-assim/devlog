@@ -6,7 +6,7 @@
 // between the first and the last snapshot. Everything in it is redacted.
 // Then a normal Claude turn reads that file and writes the paper next to it.
 import type { Gap } from '../../types'
-import { hms, type Host, makeDir, readRange, sizeOf, trimMiddle, writeText, ymd } from './io'
+import { hms, type Host, makeDir, readRange, readText, sizeOf, trimMiddle, writeText, ymd } from './io'
 import { clock, sortJournalFiles } from './gaps'
 import type { Journal, JournalEvent } from './journal'
 import { readsCredFile, readsEnvFile, readsFlagFile } from './redact'
@@ -205,20 +205,51 @@ const OUTLINES: Record<PaperType, string> = {
   custom: 'Follow what the person asked for in "Focus".',
 }
 
-export function paperPrompt(p: { type: PaperType; lang: PaperLang; focus: string; contextPath: string; paperPath: string }): string {
+const PAPER_SYSTEM = `You write papers (pentest reports, lab write-ups, portfolio presentations) from a person's devlog journal.
+Rules:
+- Use only what the journal shows and the person's explanations of the gaps. Do not invent steps, tools, results or findings.
+- Where a gap is marked UNEXPLAINED, say so in the paper at that point, plainly (for example "> Unexplained step: how X was found is not recorded").
+- Keep secret placeholders such as [PASSWORD-1] exactly as written; never guess real values.
+- Reply with the paper only, in Markdown, starting with its title. No preamble, no closing remarks.`
+
+/** The journal context is cut in the middle past this size (about 100k tokens). */
+const CONTEXT_MAX = 350_000
+
+export function paperRequest(p: { type: PaperType; lang: PaperLang; focus: string; context: string }): string {
   return [
-    `Write a ${typeLabel(p.type)} in ${p.lang === 'fr' ? 'French' : 'English'} from my devlog journal.`,
+    `Write a ${typeLabel(p.type)} in ${p.lang === 'fr' ? 'French' : 'English'} from this devlog journal.`,
+    OUTLINES[p.type],
+    p.focus.trim() ? `Focus / audience: ${p.focus.trim()}` : '',
     '',
-    `1. Read ${p.contextPath} completely (in parts if it is long). It is the whole story: commands with their outputs, file changes, my work with Claude, the gaps in the story and my explanations, and the file diffs.`,
-    `2. Write the paper. ${OUTLINES[p.type]}`,
-    p.focus.trim() ? `   Focus / audience: ${p.focus.trim()}` : '',
-    '3. Rules:',
-    '   - Use only what the context file shows and my explanations of the gaps. Do not invent steps, tools, results or findings.',
-    '   - Where a gap is marked UNEXPLAINED, say so in the paper at that point, plainly (for example "> Unexplained step: how X was found is not recorded").',
-    '   - Keep secret placeholders such as [PASSWORD-1] exactly as written. Never try to recover the real values, and do not open .devlog/tty-*.log or .devlog/terminal.jsonl (they hold raw, unredacted data).',
-    '   - Do not run commands against any target; this is writing only.',
-    `4. Save it as Markdown with the Write tool to ${p.paperPath}, then reply with one short line.`,
+    '<journal>',
+    trimMiddle(p.context, CONTEXT_MAX),
+    '</journal>',
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+/**
+ * Writes the paper in the background: one model call (no chat turn), the
+ * reply saved to `paperPath`. Throws with a readable reason on failure.
+ */
+export async function writePaper(
+  $: Host,
+  j: Journal,
+  p: { type: PaperType; lang: PaperLang; focus: string; contextPath: string; paperPath: string },
+): Promise<void> {
+  const context = await readText($, p.contextPath)
+  if (!context) throw new Error('the journal context is empty')
+  const r = await $.model.complete({
+    model: 'opus',
+    system: PAPER_SYSTEM,
+    prompt: paperRequest({ ...p, context }),
+    maxTokens: 32_000,
+    timeoutMs: 9 * 60_000,
+  })
+  if (!r.isAnswered) throw new Error('the model did not answer, try again')
+  const text = r.text.trim()
+  if (text.length < 50) throw new Error('the model returned an empty paper, try again')
+  // a last pass: the model must not have reintroduced anything that looks secret
+  await writeText($, p.paperPath, `${await j.redactor.redact(text)}\n`)
 }

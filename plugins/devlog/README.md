@@ -45,8 +45,8 @@ presentation, Lab write-up, Custom), language (Français, English) and what it s
 Unexplained gaps can be explained first; the ones left are marked as unexplained in the paper.
 Then choose **Generate and end session** or **Generate and keep journaling**. The mod gathers the
 story (commands with outputs, file changes, your work with Claude), the gaps with your answers
-and the redacted file diffs into `.devlog/papers/.context-<name>.md`, and a normal Claude turn
-writes the paper to `.devlog/papers/<date>-<type>.md`. **Open** shows it.
+and the redacted file diffs into `.devlog/papers/.context-<name>.md`, and a background model call
+(Opus, outside the chat) writes the paper to `.devlog/papers/<date>-<type>.md`. **Open** shows it.
 
 In the terminal, click a button or focus the band with ctrl+x tab; ctrl+x ctrl+a
 collapses it.

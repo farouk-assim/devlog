@@ -7,8 +7,7 @@
 // - command.run (gaps): looks for new gaps, opens the gaps pane
 // - ui.render (AbovePrompt): the band: idle / recording / paused / end confirmation
 // - ui.render (Pane devlog-gaps): the gaps list, one gap's questions and answers
-// - command.run (paper) + ui.render (Pane devlog-paper): the paper form; a Claude turn writes it
-// - turn.start / turn.complete: follow the turn that writes the paper
+// - command.run (paper) + ui.render (Pane devlog-paper): the paper form; a background model call writes it
 // - session.end: flushes queued rows
 //
 // The mod is installed at user scope, so it runs in every project; it only
@@ -20,9 +19,9 @@ import type { BandView, Gap, GapsPaneView, PaperPaneView } from '../types'
 import { activeNow, bandView, IDLE, NO_PENDING, type Pending, plural, sameView, scanPending } from './lib/band'
 import { endJournal, pauseJournal, resumeJournal, scanNow, startJournal, statusText, tick } from './lib/control'
 import { answerGap, clock, MAX_OPEN } from './lib/gaps'
-import { exists, hms } from './lib/io'
+import { hms } from './lib/io'
 import { appendEvents, findJournal, type Journal, type JournalEvent, locked, openJournal, reloadJournal } from './lib/journal'
-import { langLabel, PAPER_LANGS, PAPER_TYPES, paperName, paperPrompt, parsePaperArgs, typeLabel, writeContext } from './lib/paper'
+import { langLabel, PAPER_LANGS, PAPER_TYPES, paperName, parsePaperArgs, typeLabel, writeContext, writePaper } from './lib/paper'
 import { type QueuedRow, rowBlocks, ToolContext } from './lib/rows'
 
 const TICK_MS = 5 * 60_000
@@ -54,8 +53,8 @@ type Ctx = {
   flushTimer: boolean
   tools: ToolContext
   pending: Pending
-  /** The Claude turn writing a paper: its path, and whether that turn has started. */
-  paper: { path: string; started: boolean } | null
+  /** A paper is being written in the background. */
+  paper: boolean
 }
 
 async function locate($: EngineInterface, ctx: Ctx): Promise<void> {
@@ -141,9 +140,6 @@ async function queueRow(
   stored: { message?: SessionAppendInput['message']; uuid?: string },
 ): Promise<void> {
   if (!ctx.journal?.isRecording() || e.door === 'queue' || !stored.message) return
-  // the turn that writes the paper is not part of the story
-  const from = e.origin as { kind?: string; name?: string }
-  if (ctx.paper && (ctx.paper.started || (from.kind === 'plugin' && from.name === 'devlog'))) return
   const o = e.origin as { kind?: string; model?: string; tool?: string; name?: string }
   const m = stored.message
   ctx.queue.push({
@@ -305,6 +301,7 @@ async function generate($: EngineInterface, ctx: Ctx, endAfter: boolean): Promis
     return
   }
   await setPaper($, { view: 'generating', err: null, path: null })
+  ctx.paper = true
   try {
     await ctx.flushing
     await flush($, ctx)
@@ -314,34 +311,18 @@ async function generate($: EngineInterface, ctx: Ctx, endAfter: boolean): Promis
     const name = await paperName($, j, p.type, now)
     const contextPath = await writeContext($, j, now, name)
     const path = `${j.dir}/papers/${name}.md`
-    ctx.paper = { path, started: false }
     await setPaper($, { path })
-    void $.prompt.submit({ text: paperPrompt({ type: p.type, lang: p.lang, focus: p.focus, contextPath, paperPath: path }) })
+    await writePaper($, j, { type: p.type, lang: p.lang, focus: p.focus, contextPath, paperPath: path })
+    await locked($, j, async () => {
+      j.state.papers.push({ path, type: p.type, lang: p.lang, at: now })
+    }).catch(() => undefined)
+    await setPaper($, { view: 'ready', path })
+    $.ui.toast(`devlog: paper ready, ${path.slice(j.root.length + 1)}`)
   } catch (err) {
-    ctx.paper = null
-    await setPaper($, { view: 'failed', err: String(err) })
+    await setPaper($, { view: 'failed', err: String(err).replace(/^Error: /, '') })
   } finally {
+    ctx.paper = false
     await publish($, ctx)
-  }
-}
-
-/** The paper turn ended: is the paper there? */
-async function paperTurnDone($: EngineInterface, ctx: Ctx): Promise<void> {
-  const job = ctx.paper
-  ctx.paper = null
-  if (!job) return
-  const j = ctx.journal
-  if (await exists($, job.path)) {
-    await setPaper($, { view: 'ready', path: job.path })
-    const p = await read($, paperAtom)
-    if (j) {
-      const now = await $.clock.now()
-      await locked($, j, async () => {
-        j.state.papers.push({ path: job.path, type: p.type, lang: p.lang, at: now })
-      }).catch(() => undefined)
-    }
-  } else {
-    await setPaper($, { view: 'failed', err: 'The turn ended without saving the paper. Try again, or ask Claude to finish it.' })
   }
 }
 
@@ -383,7 +364,7 @@ export const register: Register = on => {
     flushTimer: false,
     tools: new ToolContext(),
     pending: NO_PENDING,
-    paper: null,
+    paper: false,
   }
 
   on('session.start', async ($, e, next) => {
@@ -430,17 +411,6 @@ export const register: Register = on => {
 
   on('command.run', { command: 'paper' }, async ($, e) => ({ text: await openPaper($, ctx, e.args) }))
 
-  // The turn our prompt started is the first main-loop turn to start after it was sent.
-  on('turn.start', async ($, e, next) => {
-    if (ctx.paper && !ctx.paper.started && e.agentId === undefined) ctx.paper.started = true
-    return next(e)
-  })
-  on('turn.complete', async ($, e, next) => {
-    const r = await next(e)
-    if (ctx.paper?.started && e.agentId === undefined) await paperTurnDone($, ctx).catch(() => undefined)
-    return r
-  })
-
   // The paper pane (spec: "Generate pane").
   on('ui.render', { component: 'Pane', requestId: PAPER_PANE }, async ($, e) => {
     const { Box, Button, Input, Select, Text } = $.ui.resolve(e)
@@ -451,7 +421,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" rowGap={1}>
           <Text>Writing your {kind.toLowerCase()}…</Text>
-          <Text dimColor>Claude is writing it in the conversation; it is saved to .devlog/papers/.</Text>
+          <Text dimColor>Written in the background (a few minutes): you can close this pane and keep working.</Text>
         </Box>
       )
     }
@@ -499,11 +469,11 @@ export const register: Register = on => {
             </Text>
           </Box>
           <Box flexDirection="column">
-            <Button key="gen-end" label="Generate and end session" onPress={() => generate($, ctx, true)} />
+            <Button key="gen-end" label="Generate and end session" onPress={() => void generate($, ctx, true)} />
             <Text dimColor>   The journal closes. The next start is a new session.</Text>
           </Box>
           <Box flexDirection="column">
-            <Button key="gen-keep" variant="primary" label="Generate and keep journaling" onPress={() => generate($, ctx, false)} />
+            <Button key="gen-keep" variant="primary" label="Generate and keep journaling" onPress={() => void generate($, ctx, false)} />
             <Text dimColor>   You can generate an updated paper later.</Text>
           </Box>
           <Box flexDirection="row">

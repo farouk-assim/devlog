@@ -23,7 +23,7 @@ hard part is not doing the work but writing it up afterwards.
   with no clear thread ("where did that username come from?"); a stronger one (Sonnet) confirms
   them and asks you. Your answers become context for the next checks.
 - **Writes the paper** — `/paper` gathers the story, your explanations and the file diffs, and a
-  normal Claude turn writes it to `.devlog/papers/`. Unexplained steps are marked as such.
+  background model call (Opus) writes it to `.devlog/papers/`, outside the chat. Unexplained steps are marked as such.
 
 ## Requirements
 
@@ -73,8 +73,8 @@ Start a command with a space to keep it out of the journal.
 - Everything stays in `<project>/.devlog/` (owner-only permissions). Never commit or share it:
   the raw zsh files (`terminal.jsonl`, `tty-*.log`) are **not** redacted.
 - The journal, the context sent to models and the papers only hold placeholders.
-- Model calls go through your own Claude Code session (Haiku and Sonnet for gaps, your main
-  model for the paper).
+- Model calls go through your own Claude Code session (Haiku and Sonnet for gaps, Opus for the paper,
+  in the background, outside the chat).
 - Redaction is pattern-based: it catches a lot, not everything. Read a paper before you publish it.
 
 Found a way a secret slips through? Please open an issue (with a fake value), or a PR with a

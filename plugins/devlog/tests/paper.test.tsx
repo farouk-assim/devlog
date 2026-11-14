@@ -3,7 +3,7 @@ import type { CommandRunInput, On } from 'claude-code'
 import type { TestBody } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { gapsSection, paperPrompt, parsePaperArgs, storyLine } from '../hooks/lib/paper'
+import { gapsSection, paperRequest, parsePaperArgs, storyLine } from '../hooks/lib/paper'
 import { fakeHost, termLine } from './fake'
 
 const ROOT = '/work/box'
@@ -30,13 +30,10 @@ test('/paper arguments, story lines, gaps and the prompt', () => {
   expect(gaps).toContain('Gap 2 (UNEXPLAINED)')
   expect(gaps).toContain('A: (no answer)')
 
-  const prompt = paperPrompt({ type: 'lab', lang: 'fr', focus: 'privesc', contextPath: '/c.md', paperPath: '/p.md' })
+  const prompt = paperRequest({ type: 'lab', lang: 'fr', focus: 'privesc', context: 'THE STORY' })
   expect(prompt).toContain('Write a Lab write-up in French')
-  expect(prompt).toContain('Read /c.md completely')
   expect(prompt).toContain('Focus / audience: privesc')
-  expect(prompt).toContain('UNEXPLAINED')
-  expect(prompt).toContain('do not open .devlog/tty-*.log')
-  expect(prompt).toContain('to /p.md')
+  expect(prompt).toContain('<journal>\nTHE STORY\n</journal>')
 })
 
 const PANE = {
@@ -63,17 +60,23 @@ function setup(on: On) {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
-  const submitted: string[] = []
-  on('prompt.submit', (_, e) => {
-    submitted.push(e.text)
-    return { text: e.text }
+  const usage = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  const papers: { model: string; system: string; prompt: string }[] = []
+  const reply = { paper: '# Lab report\n\nThe user www-data logged in with [PASSWORD-1] and ran id. Hunter2Secret! leaked.' as string | null }
+  on('prompt.submit', () => {
+    throw new Error('the paper must not go through the chat')
   })
-  on('turn.start', (_, e) => ({ turnId: e.turnId }))
-  on('turn.complete', () => ({ text: 'done' }))
-  on('model.complete', () => ({
-    value: { isAnswered: true as const, text: '{"suspects":[]}', usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
-  }))
-  return { clock, submitted, host: fakeHost(on, ROOT) }
+  on('model.complete', (_, e) => {
+    const system = typeof e.system === 'string' ? e.system : ''
+    if (system.includes('You write papers')) {
+      papers.push({ model: e.model, system, prompt: e.prompt })
+      return reply.paper === null
+        ? { value: { isAnswered: false as const, reason: 'api-error' as const, status: 500, error: { type: 'api_error', message: 'x' } as never, usage } }
+        : { value: { isAnswered: true as const, text: reply.paper, usage } }
+    }
+    return { value: { isAnswered: true as const, text: '{"suspects":[]}', usage } }
+  })
+  return { clock, papers, reply, host: fakeHost(on, ROOT) }
 }
 
 async function journalWithWork($: Parameters<TestBody>[0], host: ReturnType<typeof fakeHost>, clock: ReturnType<typeof mock.clock>) {
@@ -95,8 +98,8 @@ async function journalWithWork($: Parameters<TestBody>[0], host: ReturnType<type
   host.files.set(`${DIR}/state.json`, JSON.stringify(st))
 }
 
-test('form -> confirm -> a Claude turn writes the paper -> ready', async ($, on) => {
-  const { clock, submitted, host } = setup(on)
+test('form -> confirm -> written in the background -> ready', async ($, on) => {
+  const { clock, papers, host } = setup(on)
   await journalWithWork($, host, clock)
 
   expect((await $.command.run(cmd('paper', 'en lab'))).text).toBe('Paper pane opened.')
@@ -108,57 +111,47 @@ test('form -> confirm -> a Claude turn writes the paper -> ready', async ($, on)
   await ui.input({ key: 'focus', text: 'for my portfolio', kind: 'change' })
   await ui.press({ key: 'generate' })
   expect((await ui.find({ type: 'Text', text: /What happens/ }))?.text).toBe('What happens to the session?')
-  expect((await ui.find({ type: 'Text', text: /Pentest report in English/ }))?.text).toContain('of work')
 
   await ui.press({ key: 'gen-keep' })
-  expect((await ui.find({ type: 'Text', text: /Writing your/ }))?.text).toBe('Writing your pentest report…')
-  expect(submitted.length).toBe(1)
-  const prompt = submitted[0] ?? ''
-  expect(prompt).toContain('Write a Pentest report in English')
-  expect(prompt).toContain('Focus / audience: for my portfolio')
-  const contextPath = /Read (\S+) completely/.exec(prompt)?.[1] ?? ''
-  const paperPath = /Write tool to (\S+),/.exec(prompt)?.[1] ?? ''
-  expect(contextPath).toBe(`${DIR}/papers/.context-2026-11-14-pentest-report.md`)
-  expect(paperPath).toBe(`${DIR}/papers/2026-11-14-pentest-report.md`)
-
-  // the context: the story with outputs, the gaps, secrets as placeholders only
-  const context = host.files.get(contextPath) ?? ''
-  expect(context).toContain('sshpass -p [PASSWORD-1] ssh www-data@10.10.11.42 id')
-  expect(context).toContain('uid=33(www-data)')
-  expect(context).toContain('Gap 1 (explained)')
-  expect(context).toContain('A: From the website footer')
-  expect(context).toContain('Gap 2 (UNEXPLAINED)')
-  expect(context).not.toContain('Hunter2Secret!')
-
-  // the journal keeps recording
-  expect(JSON.parse(host.files.get(`${DIR}/state.json`) ?? '{}').status).toBe('recording')
-
-  // the turn runs, writes the paper, ends
-  await $.turn.start({ text: prompt, turnId: 't1' })
-  host.files.set(paperPath, '# Report\n')
-  await $.turn.complete({ turnId: 't1', answer: 'Saved.', durationMs: 10, isAborted: false, reason: 'answer', category: null, explanation: null } as never)
   expect((await ui.find({ type: 'Text', text: /Paper ready/ }))?.text).toBe('✓ Paper ready')
+  const paperPath = `${DIR}/papers/2026-11-14-pentest-report.md`
   expect((await ui.find({ type: 'Text', text: /papers\// }))?.text).toBe(paperPath)
+
+  // one background call with the whole context; nothing went through the chat
+  expect(papers.length).toBe(1)
+  const call = papers[0]
+  expect(call?.model).toBe('opus')
+  expect(call?.prompt).toContain('Write a Pentest report in English')
+  expect(call?.prompt).toContain('Focus / audience: for my portfolio')
+  expect(call?.prompt).toContain('sshpass -p [PASSWORD-1] ssh www-data@10.10.11.42 id')
+  expect(call?.prompt).toContain('uid=33(www-data)')
+  expect(call?.prompt).toContain('Gap 2 (UNEXPLAINED)')
+  expect(call?.prompt).not.toContain('Hunter2Secret!')
+  expect(call?.system).toContain('UNEXPLAINED')
+
+  // the saved paper: the model's text, with anything secret-looking hidden again
+  const paper = host.files.get(paperPath) ?? ''
+  expect(paper).toContain('# Lab report')
+  expect(paper).toContain('[PASSWORD-1]')
+  expect(paper).not.toContain('Hunter2Secret!')
+
+  expect(JSON.parse(host.files.get(`${DIR}/state.json`) ?? '{}').status).toBe('recording')
+  const listed = JSON.parse(host.files.get(`${DIR}/state.json`) ?? '{}').papers as { path: string }[]
+  expect(listed.map(p => p.path)).toEqual([paperPath])
   await ui.press({ key: 'done' })
   await ui.unmount()
-
-  const papers = JSON.parse(host.files.get(`${DIR}/state.json`) ?? '{}').papers as { path: string }[]
-  expect(papers.map(p => p.path)).toEqual([paperPath])
 })
 
-test('generate and end session; a turn that saves nothing fails clearly', async ($, on) => {
-  const { clock, submitted, host } = setup(on)
+test('generate and end session; a model failure is shown clearly', async ($, on) => {
+  const { clock, reply, host } = setup(on)
   await journalWithWork($, host, clock)
+  reply.paper = null
   await $.command.run(cmd('paper'))
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'generate' })
   await ui.press({ key: 'gen-end' })
   expect(JSON.parse(host.files.get(`${DIR}/state.json`) ?? '{}').status).toBe('ended')
-  expect(submitted.length).toBe(1)
-
-  await $.turn.start({ text: submitted[0] ?? '', turnId: 't2' })
-  await $.turn.complete({ turnId: 't2', answer: 'Sorry', durationMs: 10, isAborted: false, reason: 'answer', category: null, explanation: null } as never)
-  expect((await ui.find({ type: 'Text', text: /Could not write/ }))?.text).toContain('without saving the paper')
+  expect((await ui.find({ type: 'Text', text: /Could not write/ }))?.text).toContain('the model did not answer')
   await ui.press({ key: 'back-form' })
   expect(await ui.find({ type: 'Button', key: 'generate' })).toBeDefined()
   await ui.unmount()
