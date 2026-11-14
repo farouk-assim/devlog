@@ -1,0 +1,22 @@
+{
+  "name": "devlog",
+  "version": "0.4.0",
+  "description": "Journal a project (terminal, SSH, Claude sessions, file changes), find gaps in the story and write a paper from it",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "farouk-assim",
+    "url": "https://github.com/farouk-assim"
+  },
+  "homepage": "https://github.com/farouk-assim/devlog",
+  "repository": "https://github.com/farouk-assim/devlog",
+  "keywords": [
+    "journal",
+    "pentest",
+    "report",
+    "write-up",
+    "portfolio",
+    "zsh",
+    "hooks"
+  ],
+  "license": "GPL-3.0-or-later"
+}

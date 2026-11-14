@@ -1,0 +1,6 @@
+# written by Claude Code when it loads the mod
+plugins/devlog/.claude-plugin/types/
+node_modules/
+.DS_Store
+# never commit a journal: raw captures hold secrets
+.devlog/

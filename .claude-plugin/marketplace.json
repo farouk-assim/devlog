@@ -1,0 +1,16 @@
+{
+  "name": "devlog",
+  "owner": {
+    "name": "farouk-assim",
+    "url": "https://github.com/farouk-assim"
+  },
+  "description": "devlog: journal your work in a project, find the gaps in the story, write a paper from it",
+  "plugins": [
+    {
+      "name": "devlog",
+      "source": "./plugins/devlog",
+      "description": "Journal a project (terminal, SSH, Claude sessions, file changes), find gaps in the story and write a paper from it",
+      "version": "0.4.0"
+    }
+  ]
+}
